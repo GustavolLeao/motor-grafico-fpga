@@ -1,0 +1,71 @@
+module fila_fifo(
+	
+	input clock,
+	input reset,
+
+	//Ligação entre Interface MMIO e Fila
+
+	input fila_escrever, // Sinal recebido para armazenar a instrução no array
+	input wire [31:0] arm_instrucao, 
+	output reg fila_cheia, //Sinal de fila com capacidade máxima ocupada (parar o envio de instruções para a fila)
+
+	//Ligação Fila e Unidade de Busca
+	input unidade_ler, //Indica que a Unidade de Busca está pronta para a leitura de instrução 
+	output reg [31:0] instrucao_saida,
+	output reg fila_vazia
+);
+
+	parameter CAPACIDADE = 16;
+	//A memória física da fila- Array de 16 índices com capacidade de 32 bits cada
+
+	reg [31:0] fila [0:CAPACIDADE-1];
+
+	reg [3:0] ponteiro_escrever; //Ponteiro de escrita na fila
+	reg [3:0] ponteiro_ler; //Ponteiro de leitura de instrução na fila
+
+	reg [4:0] quantidade; //Conta de 0 a 16 (0 indica sem instruções na fila, 16 indica capacidade máxima)
+
+	always@(posedge clock or posedge reset) begin
+
+		if (reset) begin
+			ponteiro_escrever <= 4'b0;
+			ponteiro_ler <= 4'b0;
+			instrucao_saida <=32'd0;
+			quantidade <= 5'b0;
+
+		//ARM e Unidade de Controle tentando escrever instrução e ler instrução ao mesmo tempo
+
+		end else if (fila_escrever == 1'b1 && unidade_ler == 1'b1 && fila_cheia == 1'b0 && fila_vazia == 1'b0) begin
+			//Unidade de Busca lê
+			instrucao_saida <= fila[ponteiro_ler];
+			ponteiro_ler <= ponteiro_ler + 1'b1;
+			
+			//ARM escreve
+			fila[ponteiro_escrever] <= arm_instrucao;
+			ponteiro_escrever <= ponteiro_escrever + 1'b1;
+
+		//ARM tentando escrever a instrução na fila e ela não está cheia
+
+		end else if (fila_escrever ==1'b1 && fila_cheia == 1'b0) begin
+
+			fila [ponteiro_escrever] <= arm_instrucao; //Escreve a instrução no índice correspondente
+			ponteiro_escrever <= ponteiro_escrever + 1'b1; //Ponteiro de índice de escrita avança para o próximo índice
+			quantidade <= quantidade + 1'b1; //Quantidade de itens na fila aumenta 1.
+
+		// Unidade de Busca tentando ler instrução na fila e ela não está vazia
+
+		end else if (unidade_ler ==1'b1 && fila_vazia == 1'b0) begin
+
+			instrucao_saida <= fila[ponteiro_ler];
+			ponteiro_ler <= ponteiro_ler + 1'b1;
+			quantidade <= quantidade - 1'b1;
+		end
+	end
+
+	//Sinais de saídas de fila cheia e vazia são de lógica combinacional (não dependem do clock), o que evita atraso de valores
+	always @(*) begin
+		fila_cheia = (quantidade == CAPACIDADE); //AND entre quantidade de instruções na fila e capacidade da fila
+		fila_vazia = (quantidade == 5'b0); //AND entre quantidade e 0
+	end
+endmodule
+			

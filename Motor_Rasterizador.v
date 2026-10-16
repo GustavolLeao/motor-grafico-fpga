@@ -1,0 +1,464 @@
+module Motor_Rasterizador(
+
+    input wire        clk,
+    input wire        reset,
+    input wire [9:0]  next_x,
+    input wire [9:0]  next_y,
+
+    // Comunicação com a Unidade de Controle
+
+    input wire        valid,
+    input wire [2:0]  indice,
+
+    output reg        busy,
+    output reg        done,
+
+    // Dados da configuração
+
+    input wire        config_ativo,
+
+    // 1 = triângulo
+    // 0 = retângulo
+    input wire        config_tipo,
+
+    input wire [7:0]  config_cor,
+
+    input wire [9:0]  config_x,
+    input wire [9:0]  config_y,
+
+    input wire [9:0]  config_largura,
+    input wire [9:0]  config_altura,
+
+    // Movimento
+
+    input wire        mover,
+    input wire [1:0]  direcao,
+
+    // Saída
+
+    output reg [7:0] color_index
+
+);
+
+
+    // Direções
+
+    localparam CIMA     = 2'b00;
+    localparam BAIXO    = 2'b01;
+    localparam ESQUERDA = 2'b10;
+    localparam DIREITA  = 2'b11;
+
+
+    // Resolução lógica
+
+    wire [8:0] logico_x;
+    wire [7:0] logico_y;
+
+    assign logico_x = next_x;
+    assign logico_y = next_y;
+
+
+    // Registradores dos 10 polígonos
+
+    reg [8:0] posX [0:9];
+    reg [7:0] posY [0:9];
+
+    reg [8:0] largura [0:9];
+    reg [7:0] altura [0:9];
+
+    reg poligono_ativo [0:9];
+
+    // 1 = triângulo
+    // 0 = retângulo
+    reg poligono_tipo [0:9];
+
+    reg [7:0] poligono_cor [0:9];
+
+
+    // FSM
+
+    localparam ESTADO_IDLE      = 2'b00;
+    localparam ESTADO_ATUALIZAR = 2'b01;
+    localparam ESTADO_DONE      = 2'b10;
+
+    reg [1:0] estado;
+
+
+    // Índice do polígono
+
+    reg [2:0] indice_reg;
+
+
+    // Controle
+
+// Controle
+    integer i;
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            estado <= ESTADO_IDLE;
+            indice_reg <= 3'd0;
+            busy <= 1'b0;
+            done <= 1'b0;
+            for (i = 0; i < 10; i = i + 1) begin
+                posX[i] <= 9'd0;
+                posY[i] <= 8'd0;
+                largura[i] <= 9'd0;
+                altura[i] <= 8'd0;
+                poligono_ativo[i] <= 1'b0;
+                poligono_tipo[i] <= 1'b0;
+                poligono_cor[i] <= 8'd0;
+            end
+        end
+        else begin
+        case (estado)
+            // IDLE
+            ESTADO_IDLE: begin
+                busy <= 1'b0;
+                done <= 1'b0;
+
+                if (valid) begin
+                    busy <= 1'b1;
+
+                    // LATCH IMEDIATO
+                    if (mover) begin
+                        case (direcao)
+                            CIMA:     if (posY[indice] > 0) posY[indice] <= posY[indice] - 1'b1;
+                            BAIXO:    if (posY[indice] + altura[indice] < 239) posY[indice] <= posY[indice] + 1'b1;
+                            ESQUERDA: if (posX[indice] > 0) posX[indice] <= posX[indice] - 1'b1;
+                            DIREITA:  if (posX[indice] + largura[indice] < 319) posX[indice] <= posX[indice] + 1'b1;
+                        endcase
+                    end
+                    else begin
+                        posX[indice]           <= config_x;
+                        posY[indice]           <= config_y;
+                        largura[indice]        <= config_largura;
+                        altura[indice]         <= config_altura;
+                        poligono_ativo[indice] <= config_ativo;
+                        poligono_tipo[indice]  <= config_tipo;
+                        poligono_cor[indice]   <= config_cor;
+                    end
+
+                    estado <= ESTADO_DONE;
+                end
+            end
+
+            // ATUALIZAR (Obsoleto)
+            ESTADO_ATUALIZAR: begin
+                estado <= ESTADO_DONE;
+            end
+
+            // DONE
+            ESTADO_DONE: begin
+                busy <= 1'b0;
+                done <= 1'b1;
+                estado <= ESTADO_IDLE;
+            end
+
+            // Segurança
+            default: begin
+                estado <= ESTADO_IDLE;
+                busy <= 1'b0;
+                done <= 1'b0;
+            end
+        endcase
+        end
+    end
+
+
+    // Limites do polígono selecionado
+
+    wire signed [8:0] menor_x;
+    wire signed [8:0] maior_x;
+
+    wire signed [7:0] menor_y;
+    wire signed [7:0] maior_y;
+
+    assign menor_x = posX[indice];
+    assign maior_x = posX[indice] + largura[indice];
+
+    assign menor_y = posY[indice];
+    assign maior_y = posY[indice] + altura[indice];
+
+
+    // Edge functions
+
+    reg signed [21:0] edge0;
+    reg signed [21:0] edge1;
+    reg signed [21:0] edge2;
+    reg signed [21:0] edge3;
+
+
+    // Vértices
+
+    reg [8:0] vx0;
+    reg [7:0] vy0;
+
+    reg [8:0] vx1;
+    reg [7:0] vy1;
+
+    reg [8:0] vx2;
+    reg [7:0] vy2;
+
+    reg [8:0] vx3;
+    reg [7:0] vy3;
+
+
+    integer j;
+
+
+    // Rasterização
+
+    always @(*) begin
+
+        color_index = 8'd0;
+
+        vx0 = 9'd0;
+        vy0 = 8'd0;
+
+        vx1 = 9'd0;
+        vy1 = 8'd0;
+
+        vx2 = 9'd0;
+        vy2 = 8'd0;
+
+        vx3 = 9'd0;
+        vy3 = 8'd0;
+
+        edge0 = 22'sd0;
+        edge1 = 22'sd0;
+        edge2 = 22'sd0;
+        edge3 = 22'sd0;
+
+
+        // Testa os 10 polígonos
+
+        for (j = 0; j < 10; j = j + 1) begin
+
+            if (poligono_ativo[j]) begin
+
+                // Triângulo
+
+                if (poligono_tipo[j] == 1'b1) begin
+
+                    vx0 = posX[j];
+                    vy0 = posY[j];
+
+                    vx1 = posX[j] + largura[j];
+                    vy1 = posY[j];
+
+                    vx2 =
+                        posX[j] +
+                        (largura[j] >> 1);
+
+                    vy2 =
+                        posY[j] +
+                        altura[j];
+
+
+                    // Edge A -> B
+
+                    edge0 =
+                        ($signed({1'b0,vx1}) -
+                         $signed({1'b0,vx0}))
+                        *
+                        ($signed({1'b0,logico_y}) -
+                         $signed({1'b0,vy0}))
+
+                        -
+
+                        ($signed({1'b0,vy1}) -
+                         $signed({1'b0,vy0}))
+                        *
+                        ($signed({1'b0,logico_x}) -
+                         $signed({1'b0,vx0}));
+
+
+                    // Edge B -> C
+
+                    edge1 =
+                        ($signed({1'b0,vx2}) -
+                         $signed({1'b0,vx1}))
+                        *
+                        ($signed({1'b0,logico_y}) -
+                         $signed({1'b0,vy1}))
+
+                        -
+
+                        ($signed({1'b0,vy2}) -
+                         $signed({1'b0,vy1}))
+                        *
+                        ($signed({1'b0,logico_x}) -
+                         $signed({1'b0,vx1}));
+
+
+                    // Edge C -> A
+
+                    edge2 =
+                        ($signed({1'b0,vx0}) -
+                         $signed({1'b0,vx2}))
+                        *
+                        ($signed({1'b0,logico_y}) -
+                         $signed({1'b0,vy2}))
+
+                        -
+
+                        ($signed({1'b0,vy0}) -
+                         $signed({1'b0,vy2}))
+                        *
+                        ($signed({1'b0,logico_x}) -
+                         $signed({1'b0,vx2}));
+
+
+                    // Teste de interior
+
+                    if (poligono_cor[j] != 8'h00) begin
+
+                        if (
+                            (
+                                (edge0 >= 0) &&
+                                (edge1 >= 0) &&
+                                (edge2 >= 0)
+                            )
+                            ||
+                            (
+                                (edge0 <= 0) &&
+                                (edge1 <= 0) &&
+                                (edge2 <= 0)
+                            )
+                        ) begin
+
+                            color_index =
+                                poligono_cor[j];
+
+                        end
+
+                    end
+
+                end
+
+
+                // Retângulo
+
+                else begin
+
+                    vx0 = posX[j];
+                    vy0 = posY[j];
+
+                    vx1 = posX[j] + largura[j];
+                    vy1 = posY[j];
+
+                    vx2 = posX[j] + largura[j];
+                    vy2 = posY[j] + altura[j];
+
+                    vx3 = posX[j];
+                    vy3 = posY[j] + altura[j];
+
+
+                    // Edge A -> B
+
+                    edge0 =
+                        ($signed({1'b0,vx1}) -
+                         $signed({1'b0,vx0}))
+                        *
+                        ($signed({1'b0,logico_y}) -
+                         $signed({1'b0,vy0}))
+
+                        -
+
+                        ($signed({1'b0,vy1}) -
+                         $signed({1'b0,vy0}))
+                        *
+                        ($signed({1'b0,logico_x}) -
+                         $signed({1'b0,vx0}));
+
+
+                    // Edge B -> C
+
+                    edge1 =
+                        ($signed({1'b0,vx2}) -
+                         $signed({1'b0,vx1}))
+                        *
+                        ($signed({1'b0,logico_y}) -
+                         $signed({1'b0,vy1}))
+
+                        -
+
+                        ($signed({1'b0,vy2}) -
+                         $signed({1'b0,vy1}))
+                        *
+                        ($signed({1'b0,logico_x}) -
+                         $signed({1'b0,vx1}));
+
+
+                    // Edge C -> D
+
+                    edge2 =
+                        ($signed({1'b0,vx3}) -
+                         $signed({1'b0,vx2}))
+                        *
+                        ($signed({1'b0,logico_y}) -
+                         $signed({1'b0,vy2}))
+
+                        -
+
+                        ($signed({1'b0,vy3}) -
+                         $signed({1'b0,vy2}))
+                        *
+                        ($signed({1'b0,logico_x}) -
+                         $signed({1'b0,vx2}));
+
+
+                    // Edge D -> A
+
+                    edge3 =
+                        ($signed({1'b0,vx0}) -
+                         $signed({1'b0,vx3}))
+                        *
+                        ($signed({1'b0,logico_y}) -
+                         $signed({1'b0,vy3}))
+
+                        -
+
+                        ($signed({1'b0,vy0}) -
+                         $signed({1'b0,vy3}))
+                        *
+                        ($signed({1'b0,logico_x}) -
+                         $signed({1'b0,vx3}));
+
+
+                    // Teste de interior
+
+                    if (poligono_cor[j] != 8'h00) begin
+
+                        if (
+                            (
+                                (edge0 >= 0) &&
+                                (edge1 >= 0) &&
+                                (edge2 >= 0) &&
+                                (edge3 >= 0)
+                            )
+                            ||
+                            (
+                                (edge0 <= 0) &&
+                                (edge1 <= 0) &&
+                                (edge2 <= 0) &&
+                                (edge3 <= 0)
+                            )
+                        ) begin
+
+                            color_index =
+                                poligono_cor[j];
+
+                        end
+
+                    end
+
+                end
+
+            end
+
+        end
+
+    end
+
+endmodule

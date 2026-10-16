@@ -1,0 +1,302 @@
+module Motor_sprite (
+
+    input wire clk,
+
+    // VGA
+
+    input wire [9:0] next_x,
+    input wire [9:0] next_y,
+
+    // Comunicação com a Unidade de Controle
+
+    input wire       valid,
+    input wire [4:0] indice,
+
+    output reg       busy,
+    output reg       done,
+
+    // Dados da configuração do sprite
+
+    input wire [8:0] config_x,
+    input wire [7:0] config_y,
+
+    input wire [4:0] config_img,
+
+    input wire       config_ativo,
+
+    input wire       config_espelhado_H,
+    input wire       config_espelhado_V,
+
+    // Movimento
+
+    input wire       mover,
+    input wire [1:0] direcao,
+
+    // Cor
+
+    output reg [7:0] cor
+
+);
+
+
+    // Resolução lógica
+
+    wire [8:0] logico_x;
+    wire [7:0] logico_y;
+
+    assign logico_x = next_x / 2;
+    assign logico_y = next_y / 2;
+
+
+    // Direções
+
+    localparam CIMA     = 2'b00;
+    localparam BAIXO    = 2'b01;
+    localparam ESQUERDA = 2'b10;
+    localparam DIREITA  = 2'b11;
+
+
+    // Registradores dos 32 sprites
+
+    reg [8:0] sprite_x [0:31];
+    reg [7:0] sprite_y [0:31];
+
+    reg sprite_ativo [0:31];
+
+    reg [4:0] sprite_img [0:31];
+
+    reg sprite_espelhado_H [0:31];
+    reg sprite_espelhado_V [0:31];
+
+
+    // FSM
+
+    localparam ESTADO_IDLE      = 2'b00;
+    localparam ESTADO_ATUALIZAR = 2'b01;
+    localparam ESTADO_DONE      = 2'b10;
+
+    reg [1:0] estado;
+
+
+    // Índice do sprite
+
+    reg [4:0] indice_reg;
+
+
+    // Controle
+
+    always @(posedge clk) begin
+
+        case (estado)
+
+            // IDLE
+
+            ESTADO_IDLE: begin
+
+                busy <= 1'b0;
+                done <= 1'b0;
+
+                if (valid) begin
+
+                    indice_reg <= indice;
+
+                    busy <= 1'b1;
+
+                    estado <= ESTADO_ATUALIZAR;
+
+                end
+
+            end
+
+
+            // ATUALIZAR
+
+            ESTADO_ATUALIZAR: begin
+
+                // Movimento
+
+                if (mover) begin
+
+                    case (direcao)
+
+                        // CIMA
+                        CIMA: begin
+                            if (sprite_y[indice_reg] > 0)
+                                sprite_y[indice_reg] <=
+                                    sprite_y[indice_reg] - 1'b1;
+                        end
+
+                        // BAIXO
+                        BAIXO: begin
+                            if (sprite_y[indice_reg] < 224)
+                                sprite_y[indice_reg] <=
+                                    sprite_y[indice_reg] + 1'b1;
+                        end
+
+                        // ESQUERDA
+                        ESQUERDA: begin
+                            if (sprite_x[indice_reg] > 0)
+                                sprite_x[indice_reg] <=
+                                    sprite_x[indice_reg] - 1'b1;
+                        end
+
+                        // DIREITA
+                        DIREITA: begin
+                            if (sprite_x[indice_reg] < 304)
+                                sprite_x[indice_reg] <=
+                                    sprite_x[indice_reg] + 1'b1;
+                        end
+
+                    endcase
+
+                end
+
+                // Configuração
+
+                else begin
+
+                    sprite_x[indice_reg] <=
+                        config_x;
+
+                    sprite_y[indice_reg] <=
+                        config_y;
+
+                    sprite_ativo[indice_reg] <=
+                        config_ativo;
+
+                    sprite_img[indice_reg] <=
+                        config_img;
+
+                    sprite_espelhado_H[indice_reg] <=
+                        config_espelhado_H;
+
+                    sprite_espelhado_V[indice_reg] <=
+                        config_espelhado_V;
+
+                end
+
+                estado <= ESTADO_DONE;
+
+            end
+
+
+            // DONE
+
+            ESTADO_DONE: begin
+
+                busy <= 1'b0;
+
+                done <= 1'b1;
+
+                estado <= ESTADO_IDLE;
+
+            end
+
+
+            // Segurança
+
+            default: begin
+
+                estado <= ESTADO_IDLE;
+
+                busy <= 1'b0;
+
+                done <= 1'b0;
+
+            end
+
+        endcase
+
+    end
+
+
+    // ROM dos sprites
+
+    reg [14:0] endereco;
+
+    wire [7:0] cor_rom;
+
+
+    sprites32 rom (
+
+        .address(endereco),
+        .clock(clk),
+        .q(cor_rom)
+
+    );
+
+
+    // Coordenadas dentro do sprite
+
+    reg [8:0] pixel_x;
+    reg [8:0] pixel_y;
+
+    integer j;
+
+
+    // Renderização
+
+    always @(*) begin
+
+        endereco = 15'd0;
+
+        cor = 8'd0;
+
+        pixel_x = 9'd0;
+        pixel_y = 9'd0;
+
+
+        // Testa os 32 sprites
+
+        for (j = 0; j < 32; j = j + 1) begin
+
+            if (
+                sprite_ativo[j] &&
+                (logico_x >= sprite_x[j]) &&
+                (logico_x < sprite_x[j] + 16) &&
+                (logico_y >= sprite_y[j]) &&
+                (logico_y < sprite_y[j] + 16)
+            ) begin
+
+                // Coordenada dentro do sprite
+
+                pixel_x =
+                    logico_x - sprite_x[j];
+
+                pixel_y =
+                    logico_y - sprite_y[j];
+
+
+                // Espelhamento horizontal
+
+                if (sprite_espelhado_H[j])
+                    pixel_x = 15 - pixel_x;
+
+
+                // Espelhamento vertical
+
+                if (sprite_espelhado_V[j])
+                    pixel_y = 15 - pixel_y;
+
+
+                // Endereço da ROM
+
+                endereco =
+                    (sprite_img[j] * 256) +
+                    (pixel_y * 16) +
+                    pixel_x;
+
+
+                // Transparência
+
+                if (cor_rom != 8'h00)
+                    cor = cor_rom;
+
+            end
+
+        end
+
+    end
+
+endmodule
+
