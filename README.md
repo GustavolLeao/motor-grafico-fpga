@@ -42,7 +42,6 @@ Os arquivos do driver ficam na pasta `Driver/`:
 | `teste.c` | Programa com menu interativo (uma opção por instrução da ISA) e cenas animadas |
 | `teste2.c` | Cenas criativas de demonstração |
 | `teste3.c` | Bateria de testes passo a passo das instruções, incluindo `BG_TILE` e `BG_MOVER` |
-| `cena.c` | Programa independente que acessa o MMIO diretamente, sem usar o driver em Assembly |
 
 **Passo a passo:**
 
