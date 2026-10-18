@@ -132,3 +132,239 @@ O funcionamento é descrito por uma Máquina de Estados Finitos (MEF) de três e
 Os sinais `valid_leitura_fifo` e `instrucao_valida` são pulsos de um único ciclo de clock: a cada ciclo, eles retornam ao nível baixo por padrão e só são elevados nos estados descritos. Esse formato de pulso é o mesmo adotado nos sinais `valid` entre a unidade de controle e os motores gráficos, o que mantém o protocolo de comunicação uniforme em todo o projeto. Uma busca completa leva quatro ciclos de clock, ou 80 ns a 50 MHz, um tempo desprezível diante da duração da execução das instruções pelos motores gráficos. A unidade de controle mantém `valid_busca` em nível alto apenas enquanto aguarda uma nova instrução (estado MONITORAR).
 
 Ao receber o pulso `instrucao_valida`, o Registrador de Instrução (`registrador_de_instrucao.v`) armazena a instrução em `IR`, mantendo-a estável para que a unidade de controle decodifique o opcode e distribua os campos aos motores gráficos. Um sinal de reset zera a máquina de estados e todas as saídas, de modo que o coprocessador sempre inicie sem buscas pendentes.
+
+### 5. Unidade de Controle
+
+A Unidade de Controle (UC) é responsável por coordenar a execução das instruções do coprocessador gráfico. Após a Unidade de Busca disponibilizar uma nova instrução no Registrador de Instrução (`IR`), cabe à UC interpretar seus campos, selecionar os recursos necessários e controlar a execução da operação correspondente.
+
+O módulo `Unidade_Controle`, desenvolvido em Verilog, realiza a comunicação entre o Registrador de Instrução, o Banco de Registradores e as unidades funcionais do sistema: motor de sprites, motor de background, rasterizador e paleta de cores.
+
+A implementação foi organizada em duas partes principais: uma lógica combinacional, responsável pela decodificação e distribuição dos parâmetros, e uma lógica sequencial, responsável pelo controle do fluxo de execução.
+
+#### 5.1. Decodificação e distribuição dos parâmetros
+
+A UC recebe a instrução pelo barramento `IR[31:0]` e utiliza o campo `IR[31:27]` para identificar a operação a ser executada.
+
+A partir do opcode, a lógica combinacional seleciona os campos relevantes da instrução e os direciona às saídas correspondentes. Cada motor possui um conjunto próprio de sinais de dados, permitindo que a UC forneça os parâmetros necessários à operação solicitada.
+
+No caso do motor de sprites, por exemplo, a UC disponibiliza informações como índice do sprite, posição, índice da textura, visibilidade, espelhamento e direção de movimento. Para o rasterizador, são fornecidos parâmetros como índice do polígono, coordenadas, dimensões, cor, tipo de figura e visibilidade.
+
+Algumas instruções utilizam valores previamente armazenados no Banco de Registradores. Nessas situações, a UC também determina os endereços de leitura e utiliza os dados retornados para compor os parâmetros enviados aos motores.
+
+Essa organização permite que a interpretação da instrução seja centralizada na UC, enquanto cada unidade funcional permanece responsável pela execução de sua operação específica.
+
+Na implementação combinacional, as saídas recebem valores padrão antes da seleção dos campos de cada instrução. Essa prática evita a inferência de *latches* indesejados durante a síntese do circuito.
+
+#### 5.2. Máquina de Estados Finitos
+
+O sequenciamento das instruções é realizado por uma Máquina de Estados Finitos (MEF), implementada em lógica sequencial sincronizada pela borda de subida do clock.
+
+A máquina possui dois estados principais:
+
+- **MONITORAR:** estado em que a UC solicita uma nova instrução por meio do sinal `valid_busca`. Enquanto não recebe `instrucao_valida`, permanece aguardando. Quando a Unidade de Busca confirma a disponibilidade de uma instrução, a UC avança para `EXECUTAR`.
+- **EXECUTAR:** estado responsável pelo acionamento da operação identificada. Dependendo do opcode, a UC realiza uma escrita no Banco de Registradores, aguarda o sincronismo vertical ou envia um comando a uma das unidades funcionais.
+
+Para as operações gráficas, a UC utiliza dois registradores internos de controle:
+
+- `esperando_motor`: indica que uma operação foi enviada e ainda aguarda confirmação de conclusão.
+- `motor_esperado`: identifica qual unidade funcional foi acionada.
+
+Ao executar uma instrução destinada a um motor gráfico, a UC ativa o sinal `valid` correspondente e registra qual motor deverá responder. Em seguida, permanece no estado `EXECUTAR` até receber o sinal `done` daquela unidade.
+
+Após a confirmação, os registradores de acompanhamento são atualizados e a máquina retorna ao estado `MONITORAR`, permitindo que uma nova instrução seja buscada.
+
+Esse mecanismo estabelece uma execução sequencial das instruções, impedindo que a UC inicie um novo comando enquanto ainda aguarda a conclusão da operação anterior.
+
+Existem também operações que não dependem da confirmação de um motor:
+
+- **`LOAD_REG`:** realiza a escrita de um valor no Banco de Registradores e retorna ao estado de monitoramento.
+- **`ESPERA_VSYNC`:** mantém a UC no estado de execução até que o sinal `vsync` seja detectado.
+
+Caso seja identificado um opcode não reconhecido, a máquina retorna ao estado `MONITORAR`, sem acionar os motores gráficos.
+
+#### 5.3. Comunicação e sinais de controle
+
+A comunicação entre a UC e os demais módulos é realizada por sinais de controle e barramentos de parâmetros.
+
+| Interface | Sinais principais | Finalidade |
+| --- | --- | --- |
+| Unidade de Busca | `valid_busca`, `instrucao_valida` | Solicitar e receber a confirmação de uma nova instrução |
+| Registrador de Instrução | `IR[31:0]` | Disponibilizar a instrução para decodificação |
+| Banco de Registradores | `reg_write`, `reg_endereco_escrita`, `reg_dado_escrita`, endereços e dados de leitura | Realizar operações de escrita e leitura |
+| Motor de Sprites | `valid_sprite`, `done_sprite` | Iniciar e confirmar operações com sprites |
+| Motor de Background | `valid_background`, `done_background` | Iniciar e confirmar operações com cenários |
+| Rasterizador | `valid_rasterizador`, `done_rasterizador` | Iniciar e confirmar operações com polígonos |
+| Paleta | `valid_palette`, `done_palette` | Iniciar e confirmar atualizações da paleta |
+| Sincronismo VGA | `vsync` | Controlar a execução da instrução de espera vertical |
+
+Os sinais `valid` dos motores são gerados como pulsos de um ciclo de clock, indicando o início de uma operação. Os sinais `done` são recebidos pela UC e utilizados para determinar quando a execução pode prosseguir.
+
+Os motores também possuem sinais `busy`, que indicam seu estado de ocupação. Embora esses sinais estejam presentes na interface da UC, a implementação atual utiliza os sinais `done` para confirmar o término das operações.
+
+O módulo também possui uma entrada de reset, responsável por inicializar a máquina no estado `MONITORAR`, limpar os registradores internos de acompanhamento e desativar os sinais de controle.
+
+Dessa forma, a UC concentra o sequenciamento das instruções e a coordenação das unidades funcionais, mantendo separadas as responsabilidades de controle e processamento gráfico.
+
+### 6. Banco de Registradores
+
+O Banco de Registradores foi implementado para armazenar operandos utilizados pelas instruções gráficas, especialmente coordenadas e valores de cor.
+
+O módulo possui **oito registradores de 24 bits**, endereçados de `R0` a `R7`. Sua interface é composta por uma porta de escrita e duas portas de leitura, permitindo que a UC consulte até dois valores simultaneamente.
+
+Essa estrutura possibilita armazenar parâmetros antes de sua utilização, evitando a necessidade de incluí-los integralmente em todas as instruções.
+
+#### 6.1. Organização e funcionamento
+
+O banco apresenta as seguintes características:
+
+| Característica | Implementação |
+| --- | --- |
+| Quantidade de registradores | 8 |
+| Largura de cada registrador | 24 bits |
+| Endereçamento | 3 bits |
+| Portas de escrita | 1 |
+| Portas de leitura | 2 |
+| Controle de escrita | `reg_write` |
+
+A escrita ocorre por meio da instrução `LOAD_REG`. Durante sua execução, a UC fornece o endereço do registrador de destino, o valor a ser armazenado e o sinal de habilitação `reg_write`.
+
+As portas de leitura recebem os endereços selecionados pela UC e disponibilizam os valores armazenados nos registradores correspondentes.
+
+#### 6.2. Utilização pelas instruções gráficas
+
+O Banco de Registradores é utilizado principalmente nas operações de configuração de sprites e polígonos.
+
+Na instrução `SPR_CRIAR`, a UC seleciona o registrador que contém as coordenadas iniciais do sprite. O valor recuperado é dividido em dois campos:
+
+- **Coordenada X:** bits `[16:8]`, com 9 bits.
+- **Coordenada Y:** bits `[7:0]`, com 8 bits.
+
+Esses campos são encaminhados às entradas de posição do motor de sprites.
+
+Na instrução `POLI_DEFINIR`, são utilizadas as duas portas de leitura do banco. A primeira fornece as coordenadas X e Y do polígono, enquanto a segunda fornece o valor de cor.
+
+O registrador de coordenadas é selecionado pelo campo `IR[26:24]`, enquanto o registrador de cor é selecionado por `IR[3:2]`, permitindo utilizar um dos registradores `R0` a `R3` para armazenar a cor.
+
+O valor da cor é obtido dos oito bits menos significativos do registrador selecionado.
+
+#### 6.3. Papel na arquitetura
+
+A utilização do Banco de Registradores permite separar o armazenamento dos parâmetros de sua aplicação nas operações gráficas.
+
+Uma coordenada pode ser carregada previamente e posteriormente utilizada por uma instrução de criação de sprite ou definição de polígono. Da mesma forma, valores de cor podem permanecer armazenados para utilização em diferentes operações.
+
+Além de facilitar o reaproveitamento dos dados, essa estrutura contribui para a organização do datapath e permite que as instruções mantenham o tamanho fixo de 32 bits definido pela ISA.
+
+### 7. Adaptações dos Motores Gráficos
+
+Os motores gráficos de background, sprites e rasterização foram adaptados para funcionar como unidades funcionais controladas pela Unidade de Controle.
+
+Na organização anterior, esses módulos executavam suas funcionalidades a partir de sinais de controle específicos. Com a implementação do coprocessador programável, tornou-se necessário adequar suas interfaces para que as operações fossem iniciadas por instruções da ISA.
+
+As principais modificações envolveram a padronização dos sinais de comunicação, a organização do controle interno, a atualização dos registradores de configuração e a implementação do tratamento de reset.
+
+#### 7.1. Padronização da comunicação
+
+Para permitir a integração com a UC, os motores passaram a utilizar uma interface de controle baseada nos sinais `valid`, `busy` e `done`.
+
+| Sinal | Função |
+| --- | --- |
+| `valid` | Indica que a UC disponibilizou um comando para o motor |
+| `busy` | Informa que o motor está ocupado com uma operação |
+| `done` | Confirma que a operação solicitada foi concluída |
+
+O processo de comunicação ocorre da seguinte forma:
+
+1. A UC decodifica a instrução e disponibiliza os parâmetros necessários.
+2. O sinal `valid` do motor selecionado é ativado.
+3. O motor recebe o comando e realiza a operação correspondente.
+4. Após a conclusão, o motor sinaliza `done`.
+5. A UC reconhece a finalização e libera a busca da próxima instrução.
+
+A utilização dessa interface padronizada permite que diferentes motores sejam controlados por um mesmo mecanismo de sequenciamento, independentemente de suas funcionalidades internas.
+
+#### 7.2. Adaptações no controle interno
+
+As alterações também envolveram a organização das operações por meio de Máquinas de Estados Finitos.
+
+O objetivo foi estabelecer um comportamento controlado para o recebimento dos comandos e a sinalização de sua conclusão.
+
+Os motores possuem uma condição de espera, na qual podem receber novas solicitações, e uma etapa de finalização, na qual a conclusão da operação é informada à UC.
+
+Os sinais `busy` e `done` permitem representar essas condições externamente, enquanto os registradores internos mantêm os parâmetros necessários para o funcionamento dos elementos gráficos.
+
+Também foi necessário adequar as entradas dos módulos para receber diretamente os parâmetros fornecidos pela decodificação da UC.
+
+#### 7.3. Motor de Sprites
+
+O motor de sprites é responsável pela configuração e movimentação dos elementos gráficos móveis da cena.
+
+Sua integração com a UC foi realizada por meio das instruções `SPR_CRIAR` e `SPR_MOVER`.
+
+A instrução `SPR_CRIAR` permite configurar os seguintes atributos:
+
+- Índice do sprite;
+- Coordenadas X e Y;
+- Índice da textura;
+- Visibilidade;
+- Espelhamento horizontal;
+- Espelhamento vertical.
+
+As coordenadas são fornecidas a partir do Banco de Registradores, enquanto os demais parâmetros são extraídos diretamente da instrução.
+
+Já a instrução `SPR_MOVER` recebe o índice do sprite e a direção do deslocamento.
+
+As adaptações permitem que os atributos de cada sprite sejam mantidos e atualizados internamente pelo motor, enquanto a UC fica responsável apenas por enviar os comandos e acompanhar sua conclusão.
+
+#### 7.4. Motor de Background
+
+O motor de background é responsável pela seleção e movimentação dos cenários representados por tilemaps.
+
+Sua interface foi adaptada para receber as instruções `BG_TILE` e `BG_MOVER`.
+
+A instrução `BG_TILE` permite selecionar o cenário a ser utilizado por meio de um índice fornecido pela UC.
+
+A instrução `BG_MOVER` permite realizar o deslocamento do cenário de acordo com uma direção codificada em dois bits.
+
+Com essa integração, a configuração e o movimento do background passam a ocorrer como resultado da execução das instruções, sem a necessidade de controle direto do módulo pelo software.
+
+#### 7.5. Motor Rasterizador
+
+O motor rasterizador é responsável pela configuração e movimentação de figuras geométricas, incluindo retângulos e triângulos.
+
+Sua interface foi adaptada para atender às instruções `POLI_DEFINIR` e `POLI_MOVER`.
+
+A instrução `POLI_DEFINIR` fornece os seguintes parâmetros:
+
+- Índice do polígono;
+- Coordenadas X e Y;
+- Largura e altura;
+- Cor;
+- Tipo da figura;
+- Visibilidade.
+
+As coordenadas e a cor são obtidas do Banco de Registradores, enquanto os demais atributos são extraídos da instrução pela UC.
+
+Na instrução `POLI_MOVER`, são fornecidos o índice do polígono e a direção de deslocamento.
+
+Com essas alterações, o rasterizador passa a receber comandos de configuração e movimentação pela interface padronizada do coprocessador, mantendo internamente as informações necessárias para a representação das figuras.
+
+#### 7.6. Tratamento de reset
+
+Outra modificação realizada foi a implementação do tratamento de reset nos motores gráficos.
+
+O reset é responsável por estabelecer condições iniciais conhecidas para as máquinas de estados e os registradores internos utilizados pelos módulos.
+
+Essa inicialização evita que estados anteriores ou valores residuais interfiram no funcionamento do sistema após sua reinicialização.
+
+Além disso, o tratamento de reset contribui para a previsibilidade do comportamento dos motores durante a integração e os testes em hardware.
+
+#### 7.7. Resultado das modificações
+
+Com as adaptações realizadas, os motores gráficos passaram a operar como unidades funcionais subordinadas ao sequenciamento da Unidade de Controle.
+
+A UC interpreta a instrução, seleciona o motor correspondente, disponibiliza os parâmetros e aguarda a confirmação de conclusão. Os motores, por sua vez, executam as operações e mantêm os atributos internos dos elementos gráficos.
+
+Essa divisão de responsabilidades permite que o software utilize os recursos gráficos por meio da ISA, sem precisar conhecer ou manipular diretamente os sinais internos de cada motor.
+
+A integração entre a Unidade de Controle, o Banco de Registradores e os motores gráficos constitui, portanto, uma das principais etapas da transformação do núcleo gráfico original em um coprocessador programável.
